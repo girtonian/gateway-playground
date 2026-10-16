@@ -19,6 +19,27 @@
   }
 }
 
+/* Guided-tour spotlight: pulsing ring drawn over the target element.
+   Applied via JS to [data-tour] targets; removed on step change/unmount. */
+.tour-spotlight {
+  position: relative;
+  z-index: 50;
+  border-radius: 0.75rem;
+  outline: 2px solid rgba(52, 211, 153, 0.9);
+  outline-offset: 4px;
+  animation: tour-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes tour-pulse {
+  0%,
+  100% {
+    outline-color: rgba(52, 211, 153, 0.9);
+  }
+  50% {
+    outline-color: rgba(52, 211, 153, 0.25);
+  }
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
