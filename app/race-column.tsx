@@ -13,12 +13,17 @@ import {
 } from "@/lib/chat-utils";
 
 type RaceColumnProps = {
+  raceId: string;
   modelId: string;
   prompt: string;
   simulateFailure: boolean;
   /** True once this column was the first to finish. */
   isWinner: boolean;
-  onDone: (modelId: string, meta: RequestMetadata | null) => void;
+  onDone: (
+    raceId: string,
+    modelId: string,
+    meta: RequestMetadata | null,
+  ) => void;
 };
 
 /**
@@ -27,21 +32,40 @@ type RaceColumnProps = {
  * exact same streaming plumbing as single mode.
  */
 export default function RaceColumn({
+  raceId,
   modelId,
   prompt,
   simulateFailure,
   isWinner,
   onDone,
 }: RaceColumnProps) {
-  const { messages, sendMessage, status, error } = useChat({
-    transport: new DefaultChatTransport({ api: "/api/chat" }),
-  });
-
   const sentRef = useRef(false);
   const doneRef = useRef(false);
   const startedAtRef = useRef(0);
   const onDoneRef = useRef(onDone);
   const [elapsedMs, setElapsedMs] = useState(0);
+  const [requestEnded, setRequestEnded] = useState(false);
+
+  const { messages, sendMessage, status, error } = useChat({
+    transport: new DefaultChatTransport({ api: "/api/chat" }),
+    onError: () => {
+      if (doneRef.current) return;
+      doneRef.current = true;
+      setRequestEnded(true);
+      onDoneRef.current(raceId, modelId, null);
+    },
+    onFinish: ({ message, isAbort, isDisconnect, isError }) => {
+      if (doneRef.current) return;
+      doneRef.current = true;
+      setRequestEnded(true);
+      const finalMetadata = getMetadata(message);
+      onDoneRef.current(
+        raceId,
+        modelId,
+        isAbort || isDisconnect || isError ? null : finalMetadata,
+      );
+    },
+  });
 
   useEffect(() => {
     onDoneRef.current = onDone;
@@ -73,23 +97,6 @@ export default function RaceColumn({
     return () => clearInterval(t);
   }, [isBusy]);
 
-  // Report completion exactly once.
-  useEffect(() => {
-    if (metadata && !doneRef.current) {
-      doneRef.current = true;
-      onDoneRef.current(modelId, metadata);
-    }
-  }, [metadata, modelId]);
-
-  // Safety net: the route writes a metadata part even on error, but if the
-  // stream itself dies, still release the lane so the race can finish.
-  useEffect(() => {
-    if (error && !isBusy && !doneRef.current) {
-      doneRef.current = true;
-      onDoneRef.current(modelId, null);
-    }
-  }, [error, isBusy, modelId]);
-
   const model = MODELS.find((m) => m.id === modelId);
   const finished = metadata !== null;
   const cost =
@@ -99,6 +106,19 @@ export default function RaceColumn({
           metadata.usage.inputTokens,
           metadata.usage.outputTokens,
         )
+      : null;
+  const creditError =
+    metadata?.error?.includes("Free tier users do not have access to this model") ??
+    error?.message.includes("Free tier users do not have access to this model") ??
+    false;
+  const errorMessage = metadata?.error
+    ? creditError
+      ? "This model requires paid credits on your Gateway account. The free tier does not include access."
+      : metadata.error
+    : error?.message
+      ? creditError
+        ? "This model requires paid credits on your Gateway account. The free tier does not include access."
+        : error.message
       : null;
 
   return (
@@ -136,16 +156,22 @@ export default function RaceColumn({
               <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-emerald-400 align-middle" />
             )}
           </p>
-        ) : error ? (
-          <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-200">
-            Request failed: {error.message}
-          </div>
-        ) : (
+        ) : !errorMessage && !requestEnded ? (
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:150ms]" />
             <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-zinc-500 [animation-delay:300ms]" />
             <span className="ml-1">Routing…</span>
+          </div>
+        ) : null}
+        {errorMessage && (
+          <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-200">
+            Request failed: {errorMessage}
+          </div>
+        )}
+        {requestEnded && !errorMessage && !metadata && (
+          <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-3 py-2.5 text-xs text-rose-200">
+            Request ended before a response was completed.
           </div>
         )}
         {metadata?.failoverSimulated && metadata.resolvedModel && (

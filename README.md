@@ -107,3 +107,6 @@ the documented gateway semantics; verify it live once deployed.
 - Model availability changes over time; if a dropdown model 404s, check the
   [model catalog](https://vercel.com/ai-gateway/models) and update
   `lib/models.ts`.
+- Some catalog models require paid AI Gateway credits. The app reports this
+  restriction in the affected response or race lane; a failed lane never wins
+  the race. A catalog listing alone does not establish account access.

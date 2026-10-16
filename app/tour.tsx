@@ -14,7 +14,7 @@ export const TOUR_STEPS: TourStepDef[] = [
     target: "model-select",
     title: "Pick a model",
     instruction:
-      "Any of the four works — they all route through the same Gateway API key.",
+      "Choose a model available to your Gateway account. All four route through the same API key; some require paid credits.",
   },
   {
     target: "prompt-form",

@@ -29,6 +29,13 @@ type SessionRun = {
   cost: number | null;
 };
 
+type RaceRun = {
+  id: string;
+  prompt: string;
+  modelIds: string[];
+  simulateFailure: boolean;
+};
+
 const SUGGESTIONS = [
   "Explain how AI Gateway routing works in one paragraph.",
   "What happens when a provider goes down mid-request?",
@@ -36,6 +43,13 @@ const SUGGESTIONS = [
 ];
 
 const RACE_MAX_MODELS = 3;
+const FREE_TIER_MODEL_ERROR = "Free tier users do not have access to this model";
+
+function formatRequestError(message: string) {
+  return message.includes(FREE_TIER_MODEL_ERROR)
+    ? "This model requires paid credits on your Gateway account. The free tier does not include access."
+    : message;
+}
 
 export default function GatewayPlayground() {
   // ── Single mode state ──────────────────────────────────
@@ -49,15 +63,14 @@ export default function GatewayPlayground() {
     MODELS[0].id,
     MODELS[1].id,
   ]);
-  const [race, setRace] = useState<{ id: number; prompt: string } | null>(
-    null,
-  );
+  const [race, setRace] = useState<RaceRun | null>(null);
+  const raceRef = useRef<RaceRun | null>(null);
   const [raceInput, setRaceInput] = useState("");
   const [raceResults, setRaceResults] = useState<Record<string, boolean>>({});
   const [raceWinner, setRaceWinner] = useState<string | null>(null);
   const winnerRef = useRef<string | null>(null);
   const raceBusy =
-    race !== null && Object.keys(raceResults).length < raceModels.length;
+    race !== null && race.modelIds.some((id) => !raceResults[id]);
 
   // ── Session ledger (feeds the cost ticker) ──────────────
   const [sessionRuns, setSessionRuns] = useState<SessionRun[]>([]);
@@ -68,7 +81,7 @@ export default function GatewayPlayground() {
 
   const { messages, sendMessage, status, error } = useChat({
     transport: new DefaultChatTransport({ api: "/api/chat" }),
-    onFinish: ({ message }) => {
+    onFinish: ({ message, isAbort, isDisconnect, isError }) => {
       const runMetadata = getMetadata(message);
       if (runMetadata?.usage) {
         const usage = runMetadata.usage;
@@ -83,9 +96,18 @@ export default function GatewayPlayground() {
             usage.outputTokens,
           ),
         });
-        setTourStep((step) =>
-          step === 3 ? TOUR_STEPS.length : step,
-        );
+        if (
+          !isAbort &&
+          !isDisconnect &&
+          !isError &&
+          runMetadata.failoverSimulated &&
+          runMetadata.resolvedModel &&
+          runMetadata.finishReason !== "error"
+        ) {
+          setTourStep((step) =>
+            step === 3 ? TOUR_STEPS.length : step,
+          );
+        }
       }
     },
   });
@@ -95,6 +117,7 @@ export default function GatewayPlayground() {
     .reverse()
     .find((m) => m.role === "assistant");
   const metadata = lastAssistant ? getMetadata(lastAssistant) : null;
+  const requestError = metadata?.error ?? error?.message;
 
   function recordRun(run: SessionRun) {
     if (recordedRef.current.has(run.id)) return;
@@ -128,17 +151,30 @@ export default function GatewayPlayground() {
     setRaceResults({});
     setRaceWinner(null);
     winnerRef.current = null;
-    setRace({ id: Date.now(), prompt: text });
+    const nextRace: RaceRun = {
+      id: crypto.randomUUID(),
+      prompt: text,
+      modelIds: [...raceModels],
+      simulateFailure,
+    };
+    raceRef.current = nextRace;
+    setRace(nextRace);
   }
 
   function handleRaceColumnDone(
+    raceId: string,
     modelId: string,
     meta: RequestMetadata | null,
   ) {
+    if (raceRef.current?.id !== raceId) return;
     setRaceResults((prev) =>
       prev[modelId] ? prev : { ...prev, [modelId]: true },
     );
-    if (winnerRef.current === null) {
+    if (
+      meta?.resolvedModel &&
+      meta.finishReason !== "error" &&
+      winnerRef.current === null
+    ) {
       winnerRef.current = modelId;
       setRaceWinner(modelId);
     }
@@ -158,8 +194,9 @@ export default function GatewayPlayground() {
   }
 
   function startTour() {
-    if (tourStep !== null) return;
+    if (tourStep !== null || isBusy || raceBusy) return;
     setMode("single");
+    setSimulateFailure(false);
     setTourStep(0);
   }
 
@@ -202,7 +239,8 @@ export default function GatewayPlayground() {
               <button
                 type="button"
                 onClick={startTour}
-                className="rounded-full border border-zinc-700 px-3 py-1 text-[11px] font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
+                disabled={isBusy || raceBusy || tourStep !== null}
+                className="rounded-full border border-zinc-700 px-3 py-1 text-[11px] font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 Take the tour
               </button>
@@ -234,8 +272,9 @@ export default function GatewayPlayground() {
                   type="button"
                   role="tab"
                   aria-selected={mode === "single"}
-                  onClick={() => setMode("single")}
-                  className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition ${
+                  onClick={() => tourStep === null && setMode("single")}
+                  disabled={tourStep !== null}
+                  className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     mode === "single"
                       ? "bg-zinc-100 text-zinc-950"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -247,8 +286,9 @@ export default function GatewayPlayground() {
                   type="button"
                   role="tab"
                   aria-selected={mode === "race"}
-                  onClick={() => setMode("race")}
-                  className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition ${
+                  onClick={() => tourStep === null && setMode("race")}
+                  disabled={tourStep !== null}
+                  className={`rounded-md px-3.5 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50 ${
                     mode === "race"
                       ? "bg-zinc-100 text-zinc-950"
                       : "text-zinc-400 hover:text-zinc-200"
@@ -269,7 +309,10 @@ export default function GatewayPlayground() {
                 </span>
                 <select
                   value={model}
-                  onChange={(e) => setModel(e.target.value)}
+                  onChange={(e) => {
+                    setModel(e.target.value);
+                    setTourStep((step) => (step === 0 ? 1 : step));
+                  }}
                   disabled={isBusy}
                   className="w-full cursor-pointer rounded-lg border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100 outline-none transition focus:border-zinc-500 sm:w-72"
                 >
@@ -316,9 +359,11 @@ export default function GatewayPlayground() {
             aria-checked={simulateFailure}
             data-tour="chaos-toggle"
             onClick={() => {
-              setSimulateFailure((value) => !value);
-              if (!simulateFailure) {
+              if (tourStep === 2) {
+                setSimulateFailure(true);
                 setTourStep((step) => (step === 2 ? 3 : step));
+              } else {
+                setSimulateFailure((value) => !value);
               }
             }}
             disabled={isBusy || raceBusy}
@@ -354,9 +399,8 @@ export default function GatewayPlayground() {
           </p>
         )}
 
-        {mode === "race" ? (
-          /* ── Race mode ──────────────────────────────────── */
-          <section className="flex flex-1 flex-col gap-4">
+        <section className={`${mode === "race" ? "flex" : "hidden"} flex-1 flex-col gap-4`}>
+          {/* ── Race mode ──────────────────────────────────── */}
             {race && (
               <p className="rounded-xl border border-zinc-800 bg-zinc-900/60 px-4 py-3 text-sm text-zinc-300">
                 <span className="text-zinc-500">Racing prompt: </span>
@@ -366,17 +410,18 @@ export default function GatewayPlayground() {
             {race ? (
               <div
                 className={`grid flex-1 gap-4 ${
-                  raceModels.length > 2
+                  race.modelIds.length > 2
                     ? "md:grid-cols-2 xl:grid-cols-3"
                     : "md:grid-cols-2"
                 }`}
               >
-                {raceModels.map((id) => (
+                {race.modelIds.map((id) => (
                   <RaceColumn
                     key={`${race.id}-${id}`}
+                    raceId={race.id}
                     modelId={id}
                     prompt={race.prompt}
-                    simulateFailure={simulateFailure}
+                    simulateFailure={race.simulateFailure}
                     isWinner={raceWinner === id}
                     onDone={handleRaceColumnDone}
                   />
@@ -422,13 +467,12 @@ export default function GatewayPlayground() {
             </form>
             {raceBusy && (
               <p className="font-mono text-[11px] text-zinc-500">
-                {Object.keys(raceResults).length}/{raceModels.length} finished…
+                {race.modelIds.filter((id) => raceResults[id]).length}/{race.modelIds.length} finished…
               </p>
             )}
-          </section>
-        ) : (
-          /* ── Single mode (unchanged) ────────────────────── */
-          <div className="grid flex-1 gap-6 lg:grid-cols-[1fr_340px]">
+        </section>
+        <div className={`${mode === "single" ? "grid" : "hidden"} flex-1 gap-6 lg:grid-cols-[1fr_340px]`}>
+          {/* ── Single mode ────────────────────────────────── */}
             {/* Chat column */}
             <section className="flex min-h-[420px] flex-col rounded-2xl border border-zinc-800 bg-zinc-900/60">
               <div className="flex-1 space-y-5 overflow-y-auto p-5 sm:p-6">
@@ -453,7 +497,8 @@ export default function GatewayPlayground() {
                     <button
                       type="button"
                       onClick={startTour}
-                      className="mt-5 text-xs font-medium text-emerald-300 underline-offset-4 transition hover:text-emerald-200 hover:underline"
+                      disabled={isBusy || raceBusy || tourStep !== null}
+                      className="mt-5 text-xs font-medium text-emerald-300 underline-offset-4 transition hover:text-emerald-200 hover:underline disabled:cursor-not-allowed disabled:opacity-40"
                     >
                       Take the 4-step tour →
                     </button>
@@ -493,9 +538,9 @@ export default function GatewayPlayground() {
                   </div>
                 )}
 
-                {error && (
+                {requestError && (
                   <div className="rounded-xl border border-rose-500/30 bg-rose-500/10 px-4 py-3 text-sm text-rose-200">
-                    Request failed: {error.message}
+                    Request failed: {formatRequestError(requestError)}
                   </div>
                 )}
               </div>
@@ -625,7 +670,7 @@ export default function GatewayPlayground() {
                         Error
                       </dt>
                       <dd className="mt-1 font-mono text-xs break-all text-rose-200">
-                        {metadata.error}
+                        {formatRequestError(metadata.error)}
                       </dd>
                     </div>
                   )}
@@ -643,8 +688,7 @@ export default function GatewayPlayground() {
                 </dl>
               )}
             </aside>
-          </div>
-        )}
+        </div>
 
         {/* ── Footer ─────────────────────────────────────────── */}
         <footer className="mt-8 flex flex-col gap-1 border-t border-zinc-800/60 pt-5 text-xs text-zinc-600 sm:flex-row sm:items-center sm:justify-between">
